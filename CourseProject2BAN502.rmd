@@ -1,0 +1,572 @@
+---
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+# Light, Victoria 
+## BAN 502 
+### COURSE PROJECT PHASE 1 
+
+
+#### **Project Description**
+#### In Phase 2 you will build predictive models to predict the variable "Above_Median". You will develop multiple predicitve models to predict this variable. The following document will display all model building efforts. Training and testing splits will be utilized as well as the application of k-fold cross validation when building model on the training set. Multiple techniques will be employed, logisitc regression, classification trees, random forests, etc. 
+
+### ** Phase 2 Deliverables ** 
+#### There are two deliverables for Phase 2: A powerpoint presentation summarizing the findings from Phase 2. The presentation is no more than seven slides (including the title slide). The findings should focus on the practical implications of your findings. If the findings are "weak", it will be indicated so. Appropriate charts/visuals will be include in the Powerpoint presentation. There will be no visible R Code in this deliverable. 
+
+```{r include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(lmtest)
+library(dplyr)
+library(rsample)
+library(recipes)
+library(testthat)
+library(keras)
+library(mice)
+library(VIM) 
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(caret)
+```
+
+#### Read in the provided dataset of homes sales in the city of Ames, Iowa. 
+```{r }
+library(readr)
+ames_student <- read_csv("~/Documents/BAN 502/MOD5/ames_student.csv")
+```
+```{r}
+str(ames_student)
+summary(ames_student)
+```
+
+#### Mutate character variables to factor variables 
+```{r}
+ames_student1 = ames_student %>% mutate_if(is.character,as_factor)
+str(ames_student1)
+summary(ames_student1)
+```
+
+#### Exclude variables, Latitude and Longitude 
+```{r}
+no_use <- c("Latitude","Longitude","Condition_2","Exterior_2nd","MS_SubSlass","Misc.Feature","Fence","Utilities","Alley","Fireplace_Qu","Pool_QC")
+
+ames_student2 <- ames_student1[, ! (names(ames_student1) %in% no_use)]
+
+ames_student2 <- na.omit(ames_student2)
+```
+
+#### The numeric variables are on different scales. 
+```{r}
+ames_student2 %>% 
+  select(Lot_Area,Lot_Frontage,Year_Built,Gr_Liv_Area,Garage_Cars,Mo_Sold) %>% 
+  gather(feature, value)%>%
+  ggplot(aes(feature, value)) +
+  geom_boxplot() + 
+  scale_y_log10 (labels = scales::comma)
+```
+#### Order categorical features 
+```{r}
+ames_student2 %>% 
+  select(matches("(Qual,Cond,QC,Qu)$")) %>%
+  str()
+```
+
+#### Some categorical features have many levels 
+```{r}
+ames_student2 %>% 
+  select_if(~is.factor(.) & length(levels(.)) > 8) %>% 
+  glimpse()
+```
+
+#### Factor conversion. Convert the response variable Above_Median.
+```{r}
+ames_student2 = ames_student2 %>% mutate(Above_Median = as_factor(Above_Median)) %>% 
+  mutate(Above_Median = fct_recode(Above_Median, "No" = "0", "Yes" = "1" )) 
+```
+
+###  Classification Trees 
+#### Split the data (training and testing)  
+```{r}
+set.seed(123)
+ames_split = initial_split(ames_student2, prop = 0.7, strata = Above_Median) 
+train = training(ames_split)
+test = testing(ames_split)
+```
+#### Predicitive models can now be built based on the training and test data splits. 
+```{r}
+ames_recipe = recipe(Above_Median  ~., train)%>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree() %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(ames_recipe)
+
+ames_fit = fit(ames_wflow, train)
+``` 
+
+#### Look at the tree's fit and then extract the tree's fit from the fit object 
+```{r}
+ames_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit") 
+
+tree = ames_fit %>% 
+  extract_fit_parsnip() %>% 
+  pluck("fit")
+```
+
+#### Plot the tree
+```{r}
+fancyRpartPlot(tree, tweak=1.5)
+```
+
+#### Look at the "rpart" complexity parameter "cp".    
+```{r}
+ames_fit$fit$fit$fit$cptable
+```
+#### Create our folds  
+```{r}
+set.seed(234)
+folds = vfold_cv(train, v = 5)
+```
+
+```{r}
+ames_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>% 
+  set_mode("classification")
+
+tree_grid = grid_regular(cost_complexity(),
+                          levels = 25) 
+
+ames_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(ames_recipe)
+
+tree_res = 
+  ames_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+    )
+
+tree_res
+```
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+```
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+
+```{r}
+final_wf = 
+  ames_wflow %>% 
+  finalize_workflow(best_tree)
+```
+
+
+```{r}
+final_fit = fit(final_wf, train)
+
+tree = final_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree, tweak = 1.5) 
+
+```
+#### Predictions on training set  
+```{r}
+treepred = predict(final_fit, train, type = "class")
+head(treepred)
+```
+
+#### Caret confusion matrix and accuracy, etc. calcs  
+```{r}
+confusionMatrix(treepred$.pred_class,train$Above_Median,positive="Yes") 
+```
+
+#### Predictions on testing set  
+```{r}
+treepred_test = predict(final_fit, test, type = "class")
+head(treepred_test)
+```
+
+#### Caret confusion matrix and accuracy, etc. calcs  
+```{r}
+confusionMatrix(treepred_test$.pred_class,test$Above_Median,positive="Yes") 
+```
+
+### Random Forests 
+```{r}
+library(randomForest) 
+library(caret)
+library(skimr)
+library(GGally)
+library(gridExtra)
+library(vip)
+```
+
+```{r}
+set.seed(1234)
+imp_age = mice(ames_student1, m=5, method='pmm', printFlag=FALSE)
+
+Iowa_complete = complete(imp_age) 
+```
+#### Building Random Forest Model with Tidymodels
+```{r}
+Iowa_recipe = recipe(Above_Median ~., Iowa_complete) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+Iowa_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Iowa_recipe)
+
+set.seed(123)
+Iowa_fit = fit(Iowa_wflow, Iowa_complete)
+```
+#### Random forest details  
+```{r}
+Iowa_fit
+```
+#### Random Forests Predictions  
+```{r}
+predRF = predict(Iowa_fit, Iowa_complete)
+head(predRF)
+```
+#### Random Forests Confusion matrix
+```{r}
+confusionMatrix(predRF$.pred_class, Iowa_complete$Above_Median, positive = "Yes")
+```
+
+#### Random Forests Spliting the data into testing and Train  
+```{r}
+set.seed(123) 
+Iowa_split = initial_split(ames_student1, prop = 0.7, strata = Above_Median) 
+Iowa_train = training(Iowa_split)
+Iowa_test = testing(Iowa_split)
+```
+
+#### Random Forests Visualization  
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Land_Contour, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Lot_Frontage, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Lot_Area, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Lot_Shape, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Condition_1, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Street, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = MS_Zoning, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Neighborhood, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Overall_Qual, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Lot_Config, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Land_Slope, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Overall_Cond, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Bldg_Type, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = House_Style, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Mas_Vnr_Type, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Mas_Vnr_Area, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Year_Built, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Year_Remod_Add, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Roof_Style, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Roof_Matl, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Bsmt_Qual, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Bsmt_Cond, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Bsmt_Exposure, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Foundation, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Exterior_1st, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = BsmtFin_Type_1, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Exter_Qual, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Exter_Cond, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = BsmtFin_SF_1, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = BsmtFin_Type_2, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Bsmt_Unf_SF, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Total_Bsmt_SF, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Bsmt_Full_Bath, fill = Above_Median)) + geom_bar(position = "fill")
+p2 = ggplot(Iowa_train, aes(x = Bsmt_Half_Bath, fill = Above_Median)) + geom_bar(position = "fill")
+p3 = ggplot(Iowa_train, aes(x = Full_Bath, fill = Above_Median)) + geom_bar(position = "fill")
+p4 = ggplot(Iowa_train, aes(x = Half_Bath, fill = Above_Median)) + geom_bar(position = "fill")
+grid.arrange(p1,p2,p3,p4)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Above_Median, y =  Lot_Frontage)) + geom_boxplot()
+p2 = ggplot(Iowa_train, aes(x = Above_Median, y =  Total_Bsmt_SF)) + geom_boxplot()
+p3 = ggplot(Iowa_train, aes(x = Above_Median, y =  Full_Bath)) + geom_boxplot()
+grid.arrange(p1,p2,p3, ncol = 2)
+```
+
+```{r}
+p1 = ggplot(Iowa_train, aes(x = Above_Median, y =  Lot_Frontage)) + geom_boxplot()
+p2 = ggplot(Iowa_train, aes(x = Above_Median, y =  Total_Bsmt_SF)) + geom_boxplot()
+p3 = ggplot(Iowa_train, aes(x = Above_Median, y =  Neighborhood)) + geom_boxplot()
+grid.arrange(p1,p2,p3, ncol = 2)
+```
+
+
+#### Random forest  
+```{r}
+Iowa_recipe = recipe(Above_Median ~., Iowa_train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest() %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification")
+
+Iowa_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Iowa_recipe)
+
+set.seed(123)
+Iowa_fit = fit(Iowa_wflow, Iowa_train)
+```
+
+Predictions  
+```{r}
+trainpredrf = predict(Iowa_fit, Iowa_train)
+head(trainpredrf)
+```
+#### Confusion matrix
+```{r}
+confusionMatrix(trainpredrf$.pred_class, Iowa_train$Above_Median, 
+                positive = "Yes")
+```
+
+#### Predictions on test
+```{r}
+testpredrf = predict(Iowa_fit, Iowa_test)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, Iowa_test$Above_Median, 
+                positive = "Yes")
+```
+
+#### Check out variable importance
+```{r}
+Iowa_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+```{r}
+set.seed(123) 
+Iowa_split = initial_split(ames_student1, prop = 0.7, strata = Above_Median) 
+train = training(Iowa_split)
+test = testing(Iowa_split)
+```
+
+#### Set up our folds for cross-validation  
+```{r}
+set.seed(123)
+rf_folds = vfold_cv(train, v = 5)
+```
+
+#### Random forest with an R-defined tuning grid (this model took about 5 minutes to run)
+```{r}
+Iowa_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification")
+
+Iowa_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Iowa_recipe)
+
+set.seed(123)
+rf_res = tune_grid(
+  Iowa_wflow,
+  resamples = rf_folds,
+  grid = 20 
+)
+```
+
+#### Look at parameter performance 
+```{r}
+rf_res %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+#### Refining the parameters  
+```{r}
+Iowa_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification")
+
+Iowa_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Iowa_recipe)
+
+rf_grid = grid_regular(
+  mtry(range = c(3, 10)), 
+  min_n(range = c(20, 70)), 
+  levels = 5
+)
+
+set.seed(123)
+rf_res_tuned = tune_grid(
+  Iowa_wflow,
+  resamples = rf_folds,
+  grid = rf_grid 
+)
+```
+
+
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+#### An alternate view of the parameters  
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+```{r}
+best_rf = select_best(rf_res_tuned, "accuracy")
+
+final_rf = finalize_workflow(
+  Iowa_wflow,
+  best_rf
+)
+
+final_rf
+```
+
+#### Fit the finalized workflow to our training data
+```{r}
+final_rf_fit = fit(final_rf, train)
+```
+
+#### Check out variable importance
+```{r}
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+#### Predictions  
+```{r}
+trainpredrf = predict(final_rf_fit, train)
+head(trainpredrf)
+```
+
+#### Confusion matrix
+```{r}
+confusionMatrix(trainpredrf$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+#### Predictions on test
+```{r}
+testpredrf = predict(final_rf_fit, test)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
